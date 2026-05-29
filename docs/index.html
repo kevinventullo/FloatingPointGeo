@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Floating-Point Spatial Granularity</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 42rem;
+            margin: 4rem auto; padding: 0 1rem; }
+    code { background: #f0f0f0; padding: 0 .25rem; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h1>Floating-Point Spatial Granularity</h1>
+  <p>How finely can a latitude/longitude be resolved when stored as an IEEE-754
+     float? Each cell is the patch of Earth between a coordinate and its nearest
+     representable neighbours (<code>numpy.nextafter</code>).</p>
+  <ul>
+    <li><a href="float32.html">float32 granularity map</a></li>
+    <li><a href="float64.html">float64 granularity map</a></li>
+  </ul>
+</body>
+</html>
