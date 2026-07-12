@@ -124,6 +124,24 @@ def render_png(logA: np.ndarray, vmin: float, vmax: float, path: str) -> None:
     Image.fromarray((rgba * 255).astype(np.uint8)).save(path)
 
 
+def _polar_cmap():
+    """Viridis extended downward into red, for the North Pole zoom.
+
+    The pole inset continues the *same* scale as the main map but reaches cells
+    far smaller than anything on the world map, so its low end has to go below
+    viridis. We graft a red -> dark-purple ramp beneath viridis: the values that
+    are deepest-blue on the main map fade through purple into red here, reading as
+    a natural extension "off the bottom" of the main colour bar.
+    """
+    from matplotlib import cm
+    from matplotlib.colors import LinearSegmentedColormap
+
+    vir = cm.viridis(np.linspace(0.0, 1.0, 256))
+    red = np.array([0.55, 0.0, 0.10, 1.0])               # dark crimson
+    low = np.linspace(red, vir[0], 96)                   # red -> viridis purple
+    return LinearSegmentedColormap.from_list("viridis_red", np.vstack([low, vir]))
+
+
 def render_inset(precision: int, metric: str, subnormals: bool, path: str,
                  n: int = 420) -> tuple[float, float]:
     """Render a log-log zoom on Null Island and return its (vmin, vmax).
@@ -161,7 +179,10 @@ def render_inset(precision: int, metric: str, subnormals: bool, path: str,
     unit = "m²" if metric == "ground" else "deg²"
     fig, ax = plt.subplots(figsize=(3.4, 3.1), dpi=100)
     ext = [lo, 1.0, lo, 1.0]
-    im = ax.imshow(logA, origin="lower", extent=ext, cmap="viridis",
+    # Grayscale -- deliberately *unlike* the main map (and the pole inset), since
+    # Null Island is a different story (precision floor, not pole geometry). Dark
+    # still reads as "fine", matching the main map's convention.
+    im = ax.imshow(logA, origin="lower", extent=ext, cmap="gray",
                    vmin=vmin, vmax=vmax, aspect="auto", interpolation="nearest")
 
     # Mark the smallest-normal threshold -- where flush-to-zero would clip.
@@ -193,6 +214,81 @@ def render_inset(precision: int, metric: str, subnormals: bool, path: str,
     return vmin, vmax
 
 
+def render_polar(precision: int, metric: str, path: str,
+                 colat_min: float = 1e-5, colat_max: float = 5.0,
+                 n_r: int = 700, n_theta: int = 720) -> tuple[float, float]:
+    """Render a log-radius azimuthal zoom on the North Pole; return (vmin, vmax).
+
+    Looking straight down on the pole: angle = longitude, radius = colatitude
+    (90 - lat) on a LOG scale. The log radius is essential -- for the ground
+    metric the cell area collapses as cos(lat) = sin(colat) ~ colat, so on a
+    linear disc all the deep-blue "rings" are crushed into a couple of pixels at
+    the centre. On a log radius the collapse becomes evenly spaced concentric
+    rings (one viridis step per decade of colatitude), sweeping from ~5 deg
+    (where Mercator clips) down to ~1e-5 deg, i.e. ~1 m from the pole. The
+    float32 ULP of longitude additionally bands the disc into radial wedges
+    (jumps at |lon| = 64, 128 deg). Net effect: a dartboard of rings (geometry)
+    crossed by wedges (float structure).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    dtype = _DTYPES[precision]
+    # Log-spaced colatitude edges so each ring spans equal log-radius.
+    r_edges = np.logspace(math.log10(colat_min), math.log10(colat_max), n_r + 1)
+    th_edges = np.radians(np.linspace(0.0, 360.0, n_theta + 1))
+    r_c = np.sqrt(r_edges[:-1] * r_edges[1:])              # geometric centres
+    th_c = 0.5 * (th_edges[:-1] + th_edges[1:])
+
+    lat = 90.0 - r_c                                        # (n_r,)
+    lon = np.degrees(th_c) - 180.0                          # (n_theta,)
+
+    ulp_lat = ulp(lat, dtype)[:, None]                     # (n_r, 1) deg
+    ulp_lon = ulp(lon, dtype)[None, :]                     # (1, n_theta) deg
+
+    if metric == "coord":
+        area = np.broadcast_to(ulp_lat * ulp_lon, (n_r, n_theta))      # deg^2
+    else:
+        d_lat_m = ulp_lat * _METRES_PER_DEG
+        cos_lat = np.cos(np.radians(lat))[:, None]
+        d_lon_m = ulp_lon * _METRES_PER_DEG * cos_lat
+        area = np.broadcast_to(d_lat_m * d_lon_m, (n_r, n_theta))      # m^2
+    logA = np.log10(area)
+    vmin, vmax = float(logA.min()), float(logA.max())
+
+    unit = "m²" if metric == "ground" else "deg²"
+    fig, ax = plt.subplots(figsize=(3.4, 3.2), dpi=100,
+                           subplot_kw={"projection": "polar"})
+    TH, R = np.meshgrid(th_edges, r_edges)
+    pcm = ax.pcolormesh(TH, R, logA, cmap=_polar_cmap(), vmin=vmin, vmax=vmax,
+                        shading="flat")
+    ax.set_rscale("log")
+    ax.set_rlim(colat_min, colat_max)
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
+    decades = [d for d in (1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0)
+               if colat_min <= d <= colat_max]
+    ax.set_rticks(decades)
+    ax.set_yticklabels([f"{d:g}°" for d in decades], fontsize=5)
+    ax.set_rlabel_position(135)
+    ax.set_xticks(np.radians([0, 90, 180, 270]))
+    ax.set_xticklabels(["0°", "90°E", "180°", "90°W"], fontsize=5.5)
+    ax.tick_params(labelsize=5.5)
+    ax.grid(True, lw=0.3, alpha=0.4, color="white")
+    ax.set_title(f"Zoom on North Pole ({metric}), log radius\n"
+                 f"radius = 90°−lat,  {colat_min:g}°→{colat_max:g}°  "
+                 f"(centre ≈ {colat_min * _METRES_PER_DEG:.0f} m from pole)",
+                 fontsize=6.8, pad=8)
+    cb = fig.colorbar(pcm, ax=ax, shrink=0.8, pad=0.10)
+    cb.set_label(f"log₁₀(cell area, {unit})", fontsize=6.5)
+    cb.ax.tick_params(labelsize=6)
+    fig.tight_layout(pad=0.4)
+    fig.savefig(path, dpi=100, transparent=True)
+    plt.close(fig)
+    return vmin, vmax
+
+
 def _human_len(metres: float) -> str:
     a = abs(metres)
     for name, fac in [("km", 1e3), ("m", 1.0), ("mm", 1e-3), ("µm", 1e-6),
@@ -202,9 +298,44 @@ def _human_len(metres: float) -> str:
     return f"{metres:.1e} m"
 
 
+def _collapsible_box(title: str, img_path: str, box_id: str, corner_css: str,
+                     start_open: bool = True) -> str:
+    """A pinned, click-to-collapse panel wrapping a base64-embedded image.
+
+    ``box_id`` must be unique per panel so multiple panels don't share element
+    IDs. ``corner_css`` positions the panel (e.g. "bottom:24px; right:12px;").
+    """
+    with open(img_path, "rb") as f:
+        uri = "data:image/png;base64," + base64.b64encode(f.read()).decode("ascii")
+    disp = "block" if start_open else "none"
+    arrow = "▾" if start_open else "▸"
+    return f"""
+<div style="position:fixed; {corner_css} z-index:9999;
+            background:rgba(255,255,255,.95); border-radius:6px;
+            box-shadow:0 1px 4px rgba(0,0,0,.3); overflow:hidden;
+            font:12px system-ui,sans-serif;">
+  <div onclick="var b=document.getElementById('{box_id}-body');
+                var t=document.getElementById('{box_id}-toggle');
+                var c=b.style.display!=='none';
+                b.style.display=c?'none':'block';
+                t.textContent=c?'▸':'▾';"
+       style="cursor:pointer; padding:4px 8px; background:#f4f4f4;
+              border-bottom:1px solid #ddd; user-select:none; font-weight:600;
+              display:flex; justify-content:space-between; align-items:center;">
+    <span>{title}</span>
+    <span id="{box_id}-toggle">{arrow}</span>
+  </div>
+  <div id="{box_id}-body" style="display:{disp}; padding:6px;">
+    <img src="{uri}" style="display:block; width:300px; height:auto;" alt="{title}">
+  </div>
+</div>
+"""
+
+
 def build_map(png_path: str, lat_bound: float, vmin: float, vmax: float,
               precision: int, metric: str, opacity: float, html_path: str,
-              inset_path: str | None = None) -> None:
+              inset_path: str | None = None,
+              polar_path: str | None = None) -> None:
     """Wrap the Mercator overlay PNG in a folium/Leaflet page.
 
     The PNG is base64-embedded so the page is self-contained. A labels/boundaries
@@ -223,7 +354,16 @@ def build_map(png_path: str, lat_bound: float, vmin: float, vmax: float,
     unit = "m²" if metric == "ground" else "deg²"
 
     m = folium.Map(location=[20, 0], zoom_start=2, min_zoom=1, max_bounds=True,
-                   tiles="CartoDB positron", world_copy_jump=True)
+                   tiles=None, world_copy_jump=True)
+
+    # A LABEL-FREE light base (CARTO positron "no labels"). Every label then comes
+    # from one English overlay on top (below), so there's a single, coherent label
+    # layer instead of two clashing sets rendered at different depths.
+    folium.TileLayer(
+        tiles="https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png",
+        attr="&copy; OpenStreetMap contributors &copy; CARTO",
+        name="light base", control=False,
+    ).add_to(m)
 
     ImageOverlay(
         image=data_uri,
@@ -234,19 +374,9 @@ def build_map(png_path: str, lat_bound: float, vmin: float, vmax: float,
         control=False,
     ).add_to(m)
 
-    # Coastlines / borders / labels rendered ABOVE the heatmap via a custom pane.
-    try:
-        from folium.map import CustomPane
-        CustomPane("labels", z_index=650).add_to(m)
-        folium.TileLayer(
-            tiles=("https://{s}.basemaps.cartocdn.com/rastertiles/"
-                   "voyager_only_labels/{z}/{x}/{y}{r}.png"),
-            attr="&copy; OpenStreetMap contributors &copy; CARTO",
-            name="labels & boundaries",
-            overlay=True, control=False, pane="labels",
-        ).add_to(m)
-    except Exception:  # pragma: no cover - older folium without CustomPane
-        pass
+    # No label layer: the base is CARTO "no labels", so the map is just clean grey
+    # land/sea (coastlines give orientation) with the heatmap on top -- the minimum
+    # cartography, and nothing localized to clash.
 
     n = 16
     swatches = [mcolors.to_hex(cm.viridis(i / (n - 1))) for i in range(n)]
@@ -257,31 +387,14 @@ def build_map(png_path: str, lat_bound: float, vmin: float, vmax: float,
     m.add_child(legend)
 
     if inset_path is not None:
-        with open(inset_path, "rb") as f:
-            inset_uri = ("data:image/png;base64,"
-                         + base64.b64encode(f.read()).decode("ascii"))
-        m.get_root().html.add_child(folium.Element(f"""
-<div id="inset" style="position:fixed; bottom:24px; right:12px; z-index:9999;
-            background:rgba(255,255,255,.95); border-radius:6px;
-            box-shadow:0 1px 4px rgba(0,0,0,.3); overflow:hidden;
-            font:12px system-ui,sans-serif;">
-  <div onclick="var b=document.getElementById('inset-body');
-                var t=document.getElementById('inset-toggle');
-                var c=b.style.display!=='none';
-                b.style.display=c?'none':'block';
-                t.textContent=c?'▸':'▾';"
-       style="cursor:pointer; padding:4px 8px; background:#f4f4f4;
-              border-bottom:1px solid #ddd; user-select:none; font-weight:600;
-              display:flex; justify-content:space-between; align-items:center;">
-    <span>Zoom on Null Island</span>
-    <span id="inset-toggle">▾</span>
-  </div>
-  <div id="inset-body" style="display:block; padding:6px;">
-    <img src="{inset_uri}" style="display:block; width:300px; height:auto;"
-         alt="log-log zoom on Null Island">
-  </div>
-</div>
-"""))
+        m.get_root().html.add_child(folium.Element(_collapsible_box(
+            "Zoom on Null Island", inset_path, "inset",
+            "bottom:24px; right:12px;")))
+
+    if polar_path is not None:
+        m.get_root().html.add_child(folium.Element(_collapsible_box(
+            "Zoom on North Pole", polar_path, "polar",
+            "bottom:24px; left:12px;")))
 
     m.save(html_path)
 
@@ -350,14 +463,18 @@ def main() -> None:
         render_png(logA, vmin, vmax, png_path)
 
         inset_path = None
+        polar_path = None
         if not args.no_inset:
-            inset_name = f"inset_float{prec}_{args.metric}.png"
-            inset_path = os.path.join(args.outdir, inset_name)
+            inset_path = os.path.join(
+                args.outdir, f"inset_float{prec}_{args.metric}.png")
             render_inset(prec, args.metric, args.subnormals, inset_path)
+            polar_path = os.path.join(
+                args.outdir, f"polar_float{prec}_{args.metric}.png")
+            render_polar(prec, args.metric, polar_path)
 
         build_map(png_path, lat_bound, vmin, vmax, prec, args.metric,
                   args.opacity, os.path.join(args.outdir, html_name),
-                  inset_path=inset_path)
+                  inset_path=inset_path, polar_path=polar_path)
         generated.append((prec, html_name))
         print(f"float{prec}: log10({args.metric}) range "
               f"[{vmin:.2f}, {vmax:.2f}] -> {args.outdir}/{html_name}")
