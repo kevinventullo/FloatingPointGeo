@@ -60,7 +60,7 @@ Outputs land in `docs/`:
 - `float32.html`, `float64.html` — self-contained Leaflet maps (PNG embedded as
   a data URI, so no external assets). The overlay is rendered in **Web Mercator**
   so it lines up with the basemap; a labels/boundaries layer sits *above* the
-  heatmap, and there's a log color legend plus an info box
+  heatmap, and there's a log color legend plus an info box (see e.g. https://kevinventullo.github.io/FloatingPointGeo/float32.html for    the actual hosted page)
 - `granularity_float{32,64}_{metric}.png` — the raw overlay images
 
 ## Hosting on GitHub Pages
